@@ -1,0 +1,116 @@
+name: 'Drupal Files Sync'
+description: 'Syncs public files from PROD to TEST using SSH agent forwarding and ephemeral keys'
+author: 'EauDeWeb'
+
+inputs:
+  source_files_dir:
+    description: 'Absolute path to the files directory on PROD'
+    required: true
+  target_files_dir:
+    description: 'Absolute path to the files directory on TEST'
+    required: true
+  prod_ssh_key:
+    description: 'SSH private key for PROD server'
+    required: true
+  prod_ssh_host:
+    description: 'PROD server hostname or IP'
+    required: true
+  prod_ssh_user:
+    description: 'SSH user for PROD server'
+    required: true
+  test_ssh_key:
+    description: 'SSH private key for TEST server'
+    required: true
+  test_ssh_host:
+    description: 'TEST server hostname or IP'
+    required: true
+  test_ssh_user:
+    description: 'SSH user for TEST server'
+    required: true
+
+runs:
+  using: composite
+  steps:
+    - name: 'Setup SSH'
+      shell: bash
+      run: |
+        mkdir -p ~/.ssh
+        echo "${{ inputs.prod_ssh_key }}" > ~/.ssh/prod_key
+        echo "${{ inputs.test_ssh_key }}" > ~/.ssh/test_key
+        chmod 600 ~/.ssh/prod_key ~/.ssh/test_key
+        ssh-keyscan -H "${{ inputs.prod_ssh_host }}" >> ~/.ssh/known_hosts 2>/dev/null
+        ssh-keyscan -H "${{ inputs.test_ssh_host }}" >> ~/.ssh/known_hosts 2>/dev/null
+        ssh-keygen -t ed25519 -f ~/.ssh/sync_key -N "" -C "sync-$(date +%s)"
+        eval $(ssh-agent -s)
+        ssh-add ~/.ssh/sync_key
+        echo "SSH_AUTH_SOCK=$SSH_AUTH_SOCK" >> $GITHUB_ENV
+        echo "SSH_AGENT_PID=$SSH_AGENT_PID" >> $GITHUB_ENV
+
+    - name: 'Add ephemeral key to TEST'
+      shell: bash
+      run: |
+        ssh -i ~/.ssh/test_key \
+          "${{ inputs.test_ssh_user }}@${{ inputs.test_ssh_host }}" \
+          "echo '$(cat ~/.ssh/sync_key.pub)' >> ~/.ssh/authorized_keys"
+
+    - name: 'Check disk space on TEST'
+      shell: bash
+      run: |
+        TRANSFER_SIZE=$(ssh -A -i ~/.ssh/prod_key \
+          "${{ inputs.prod_ssh_user }}@${{ inputs.prod_ssh_host }}" \
+          "rsync -az --no-perms --no-times --no-group --dry-run --stats \
+            -e 'ssh -o StrictHostKeyChecking=no' \
+            ${{ inputs.source_files_dir }}/ \
+            ${{ inputs.test_ssh_user }}@${{ inputs.test_ssh_host }}:${{ inputs.target_files_dir }}/" \
+          | grep 'Total transferred file size' | sed 's/[^0-9]//g')
+
+        if [ -z "$TRANSFER_SIZE" ]; then
+          echo "Could not determine transfer size."
+          exit 1
+        fi
+
+        read FREE_SPACE TOTAL_SPACE <<< $(ssh -i ~/.ssh/test_key \
+          "${{ inputs.test_ssh_user }}@${{ inputs.test_ssh_host }}" \
+          "df -B1 ${{ inputs.target_files_dir }} | awk 'NR==2 {print \$4, \$2}'")
+
+        BUFFER=$(awk "BEGIN {printf \"%d\", $TOTAL_SPACE * 0.05}")
+
+        to_gb() { awk "BEGIN {printf \"%.1f\", $1 / 1024 / 1024 / 1024}"; }
+
+        echo "Data to transfer:      $(to_gb $TRANSFER_SIZE) GB"
+        echo "Free space on test:    $(to_gb $FREE_SPACE) GB"
+        echo "Minimum buffer (5%):   $(to_gb $BUFFER) GB"
+
+        REMAINING=$(( FREE_SPACE - TRANSFER_SIZE ))
+        if [ "$REMAINING" -lt "$BUFFER" ]; then
+          echo "::error::Not enough disk space on test. Transfer: $(to_gb $TRANSFER_SIZE) GB, free: $(to_gb $FREE_SPACE) GB, remaining after copy: $(to_gb $REMAINING) GB (minimum required 5%: $(to_gb $BUFFER) GB)."
+          exit 1
+        fi
+
+        echo "Disk space check OK — $(to_gb $REMAINING) GB will remain free after copy."
+
+    - name: 'Sync files PROD → TEST'
+      shell: bash
+      run: |
+        ssh -A -i ~/.ssh/prod_key \
+          "${{ inputs.prod_ssh_user }}@${{ inputs.prod_ssh_host }}" \
+          "rsync -az --no-perms --no-times --no-group --delete \
+            -e 'ssh -o StrictHostKeyChecking=no' \
+            ${{ inputs.source_files_dir }}/ \
+            ${{ inputs.test_ssh_user }}@${{ inputs.test_ssh_host }}:${{ inputs.target_files_dir }}/"
+
+    - name: 'Remove ephemeral key from TEST'
+      if: always()
+      shell: bash
+      run: |
+        COMMENT=$(awk '{print $3}' ~/.ssh/sync_key.pub)
+        ssh -i ~/.ssh/test_key \
+          "${{ inputs.test_ssh_user }}@${{ inputs.test_ssh_host }}" \
+          "sed -i '/$COMMENT/d' ~/.ssh/authorized_keys"
+
+    - name: 'Cleanup runner'
+      if: always()
+      shell: bash
+      run: |
+        ssh-agent -k || true
+        rm -f ~/.ssh/prod_key ~/.ssh/test_key ~/.ssh/sync_key ~/.ssh/sync_key.pub
