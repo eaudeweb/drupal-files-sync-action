@@ -58,7 +58,7 @@ runs:
       run: |
         TRANSFER_SIZE=$(ssh -A -i ~/.ssh/prod_key \
           "${{ inputs.prod_ssh_user }}@${{ inputs.prod_ssh_host }}" \
-          "rsync -az --no-perms --no-times --no-group --dry-run --stats \
+          "rsync -az --no-perms --no-times --no-group --size-only --dry-run --stats \
             -e 'ssh -o StrictHostKeyChecking=no' \
             ${{ inputs.source_files_dir }}/ \
             ${{ inputs.test_ssh_user }}@${{ inputs.test_ssh_host }}:${{ inputs.target_files_dir }}/" \
@@ -94,7 +94,7 @@ runs:
       run: |
         ssh -A -i ~/.ssh/prod_key \
           "${{ inputs.prod_ssh_user }}@${{ inputs.prod_ssh_host }}" \
-          "rsync -az --no-perms --no-times --no-group --delete \
+          "rsync -az --no-perms --no-times --no-group --size-only --delete \
             -e 'ssh -o StrictHostKeyChecking=no' \
             ${{ inputs.source_files_dir }}/ \
             ${{ inputs.test_ssh_user }}@${{ inputs.test_ssh_host }}:${{ inputs.target_files_dir }}/"

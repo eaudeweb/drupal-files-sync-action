@@ -8,7 +8,7 @@ GitHub composite action that syncs public files from a PROD server to a TEST ser
 2. Generate an ephemeral ed25519 key unique to each run
 3. Add the ephemeral public key to TEST's `authorized_keys`
 4. Validate available disk space on TEST — requires at least 5% of total disk to remain free after transfer
-5. `rsync` from PROD → TEST via SSH agent forwarding (the private key never touches PROD)
+5. `rsync` from PROD → TEST via SSH agent forwarding (the private key never touches PROD). Files are compared by size only (`--size-only`): timestamps are not preserved on TEST (`--no-times`), so comparing them would re-copy every file already synced on each run and inflate the disk space check in step 4
 6. Remove the ephemeral key from TEST and all keys from the runner
 
 ## Usage
